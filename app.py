@@ -1,156 +1,131 @@
 import streamlit as st
-import openai
+import pandas as pd
+import numpy as np
 import os
-from dotenv import load_dotenv
+import json
+from datetime import datetime
 
-# --- Load environment variables and OpenAI API key ---
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+st.set_page_config(page_title="🚀 S&P500 Research Terminal", layout="wide")
+st.title("🚀 S&P 500 Quant Explorer Terminal")
 
-# --- Streamlit page configuration ---
-st.set_page_config(page_title="V1 Marketing Network Chatbot", page_icon="🤖", layout="centered")
+# --- SIDEBAR: Data Source ---
+with st.sidebar:
+    st.header("📂 Data Source")
+    data_type = st.radio("Choose Data Type", ["CSV upload", "SP500 JSON folder"])
+    fee = st.number_input("Trade Fee (%)", min_value=0.0, max_value=1.0, value=0.0005)
 
-# --- Custom CSS for straight, clean chat window ---
-st.markdown("""
-    <style>
-        html, body, [class*="css"]  {
-            font-family: Arial, sans-serif !important;
-            background-color: #fff !important;
-            color: #111 !important;
-        }
-        .chat-outer {
-            width: 100%;
-            display: flex;
-            justify-content: center;
-        }
-        .chat-inner {
-            width: 500px;
-            max-width: 98vw;
-            background: #fff;
-            border: 1px solid #ddd;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.06);
-            padding: 0;
-            margin-top: 32px;
-            margin-bottom: 32px;
-            border-radius: 0px;
-        }
-        .chat-header {
-            font-size: 2em;
-            font-weight: 700;
-            letter-spacing: 2px;
-            background: #111;
-            color: #fff;
-            padding: 18px 24px;
-            border-bottom: 1px solid #eee;
-            border-radius: 0px;
-            text-align: center;
-        }
-        .msg-row {
-            width: 100%;
-            padding: 0 24px;
-        }
-        .user-msg, .bot-msg {
-            margin: 18px 0 0 0;
-            padding: 14px 18px;
-            font-size: 1.08em;
-            border-radius: 0px;
-            width: fit-content;
-            min-width: 20%;
-            max-width: 96%;
-            white-space: pre-wrap;
-        }
-        .user-msg {
-            background: #f2f2f2;
-            color: #111;
-            margin-left: auto;
-            margin-right: 0;
-            border-left: 3px solid #111;
-            border-right: none;
-        }
-        .bot-msg {
-            background: #fff;
-            color: #111;
-            margin-right: auto;
-            margin-left: 0;
-            border-right: 3px solid #111;
-            border-left: none;
-            border-top: 1px solid #eee;
-            border-bottom: 1px solid #eee;
-        }
-        .bubble-author {
-            font-size: 0.85em;
-            color: #666;
-            margin-bottom: 3px;
-        }
-        .stTextInput>div>div>input {
-            background-color: #f7f7f7;
-            color: #111;
-            font-family: Arial, sans-serif !important;
-            border: 1px solid #ddd;
-            border-radius: 0;
-        }
-        .stForm {
-            padding: 18px 24px;
-            border-top: 1px solid #eee;
-            background: #fafafa;
-            border-radius: 0px;
-        }
-        @media (max-width: 600px) {
-            .chat-inner { padding: 0 !important; }
-            .msg-row { padding: 0 3vw !important; }
-        }
-    </style>
-""", unsafe_allow_html=True)
+    st.markdown("---")    
+    st.header("🔬 Strategy Params")
+    fast_ma = st.slider("Fast MA Days", 3, 50, 10)
+    slow_ma = st.slider("Slow MA Days", 10, 200, 50)
 
-# --- System prompt and bot intro ---
-V1_PROMPT = (
-    "I am a billionaire investor trying to build a marketing agency network called v1."
-)
-WELCOME = (
-    "Hello! I’m a billionaire investor building a marketing agency network called V1.\n"
-    "What would you like to know or discuss about joining, collaborating, or investing?"
-)
+# --- Main Data Load ---
+symbol = None
+df = None
 
-# --- Initialize chat history ---
-if "messages" not in st.session_state:
-    st.session_state["messages"] = [
-        {"role": "system", "content": V1_PROMPT},
-        {"role": "assistant", "content": WELCOME}
-    ]
-
-# --- Structured chat UI ---
-st.markdown('<div class="chat-outer"><div class="chat-inner">', unsafe_allow_html=True)
-st.markdown('<div class="chat-header">V1 Marketing Network 🤖</div>', unsafe_allow_html=True)
-
-for msg in st.session_state["messages"][1:]:  # skip system prompt
-    if msg["role"] == "user":
-        st.markdown(
-            f'<div class="msg-row"><div class="user-msg"><span class="bubble-author">You</span><br>{msg["content"]}</div></div>',
-            unsafe_allow_html=True)
+if data_type == "CSV upload":
+    uploaded = st.sidebar.file_uploader("Upload a CSV", type=["csv"])
+    if uploaded:
+        df = pd.read_csv(uploaded, parse_dates=["date"])
+        symbol = uploaded.name.replace(".csv", "")
     else:
-        st.markdown(
-            f'<div class="msg-row"><div class="bot-msg"><span class="bubble-author">V1</span><br>{msg["content"]}</div></div>',
-            unsafe_allow_html=True)
-        
-# --- Bottom input form with distinct background ---
-st.markdown('</div></div>', unsafe_allow_html=True)
-with st.form(key="input_form", clear_on_submit=True):
-    user_input = st.text_input(
-        "Your message", 
-        "", 
-        placeholder="Type here and press Enter…", 
-        key="user_input", 
-        label_visibility="collapsed"
-    )
-    submitted = st.form_submit_button("Send")
+        st.info("Upload a CSV file with 'date','close',... columns")
+        st.stop()
+else:
+    sp500_folder = os.path.join(os.getcwd(), "sp500")
+    if not os.path.isdir(sp500_folder):
+        st.error("No 'sp500' folder found in your project!")
+        st.stop()
+    json_files = [f for f in os.listdir(sp500_folder) if f.endswith(".json")]
+    if not json_files:
+        st.error("No JSON files found inside 'sp500/' folder.")
+        st.stop()
+    chosen = st.sidebar.selectbox("Pick a JSON file", json_files)
+    st.write(f"**Loaded:** `{chosen}` from `sp500/`")
+    with open(os.path.join(sp500_folder, chosen)) as f:
+        data = json.load(f)
+    result = data['chart']['result'][0]
+    timestamps = result['timestamp']
+    quote = result['indicators']['quote'][0]
+    df = pd.DataFrame({
+        "date": [datetime.fromtimestamp(ts) for ts in timestamps],
+        "open": quote.get("open"),
+        "high": quote.get("high"),
+        "low": quote.get("low"),
+        "close": quote.get("close"),
+        "volume": quote.get("volume")
+    })
+    symbol = chosen.replace(".json", "")
 
-if submitted and user_input.strip():
-    st.session_state["messages"].append({"role": "user", "content": user_input})
-    with st.spinner("V1 is thinking..."):
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=st.session_state["messages"]
+# --- Quick Data Check ---
+st.subheader(f"💡 Data Preview: `{symbol}`")
+st.dataframe(df.head(), hide_index=True, use_container_width=True)
+
+if 'close' not in df.columns:
+    st.error("No 'close' column found. Check your data format.")
+    st.stop()
+
+# --- Strategy Logic ---
+df["fast_ma"] = df["close"].rolling(fast_ma).mean()
+df["slow_ma"] = df["close"].rolling(slow_ma).mean()
+buy_signal = (df["fast_ma"] > df["slow_ma"]) & (df["fast_ma"].shift(1) <= df["slow_ma"].shift(1))
+sell_signal = (df["fast_ma"] < df["slow_ma"]) & (df["fast_ma"].shift(1) >= df["slow_ma"].shift(1))
+df["signal"] = np.nan
+df.loc[buy_signal, "signal"] = 1
+df.loc[sell_signal, "signal"] = -1
+df["signal"] = df["signal"].ffill().fillna(0)
+df["position"] = df["signal"].shift().fillna(0)
+df["returns"] = df["close"].pct_change().fillna(0)
+df["strategy_returns"] = df["position"] * df["returns"]
+
+# Deduct trade fee on signal change
+df["trade"] = df["signal"].diff().abs().fillna(0)
+df["strategy_returns_net"] = df["strategy_returns"] - df["trade"] * fee
+
+# Cumulative curves
+df["cum_market"] = (1 + df["returns"]).cumprod()
+df["cum_strategy"] = (1 + df["strategy_returns_net"]).cumprod()
+
+# --- Dashboard Layout ---
+tab1, tab2 = st.tabs(["📊 Charts", "🧾 Recent Trades & Performance"])
+
+with tab1:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### Price & Moving Averages")
+        chart_ma = df.set_index("date")[["close", "fast_ma", "slow_ma"]]
+        st.line_chart(chart_ma, use_container_width=True)
+    with c2:
+        st.markdown("#### Cumulative Returns")
+        chart_cum = df.set_index("date")[["cum_market", "cum_strategy"]]
+        st.line_chart(chart_cum, use_container_width=True)
+
+with tab2:
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("#### 📝 Performance Metrics")
+        final_strat = df["cum_strategy"].iloc[-1]
+        final_market = df["cum_market"].iloc[-1]
+        sharpe = (
+            df["strategy_returns_net"].mean() / df["strategy_returns_net"].std() * np.sqrt(252)
+            if df["strategy_returns_net"].std() != 0 else float('nan')
         )
-        reply = response.choices[0].message.content
-        st.session_state["messages"].append({"role": "assistant", "content": reply})
-        st.rerun()
+        # Max drawdown
+        running_max = df["cum_strategy"].cummax()
+        drawdown = ((df["cum_strategy"] / running_max).min() - 1) if not running_max.isnull().all() else None
+
+        st.metric("Strategy Total Return (%)", f"{100 * (final_strat-1):.2f}")
+        st.metric("Market Total Return (%)", f"{100 * (final_market-1):.2f}")
+        st.metric("Sharpe Ratio", f"{sharpe:.2f}")
+        st.metric("Max Drawdown (%)", f"{100 * drawdown:.2f}" if drawdown is not None else "N/A")
+    with c4:
+        st.markdown("#### 🗒️ Recent Trades Blotter")
+        trade_blotter = df[df['signal'].diff() != 0][["date", "signal", "close"]]
+        trade_blotter['Trade'] = trade_blotter['signal'].map({1: "BUY", -1: "SELL", 0: "HOLD"})
+        st.dataframe(trade_blotter[["date", "Trade", "close"]].tail(10), hide_index=True)
+
+# --- Raw Data Expand ---
+with st.expander("Show Raw Simulation Data Table"):
+    st.dataframe(df, use_container_width=True)
+
+st.caption("💡 Place more JSON files into `sp500/` (at the same level as `app.py`), or upload a CSV file to analyze other assets. Happy researching!")
